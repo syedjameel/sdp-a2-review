@@ -1,0 +1,119 @@
+  mongo_data:
+    image: mongo:latest
+    volumes:
+      - ./mongo_data:/mongo_data
+    command: bash -c "
+      mongoimport --host mongodb --type csv -d clients -c sessions --headerline mongo_data/raw_2022_09_30.csv
+      "
+    links:
+      - mongodb
+
+
+from pymongo import MongoClient
+import csv
+import os
+import requests
+from datetime import datetime, timedelta
+import threading
+import time
+import signal
+import sys
+from queue import Queue
+
+RUNFLAG = True
+
+def signal_handling(signum, frame):
+    print("Exiting ...")
+    global RUNFLAG
+    RUNLAG = False
+    sys.exit()
+
+
+signal.signal(signal.SIGINT, signal_handling)
+
+base_date = '2022_09_01'
+file_name = 'raw_'+base_date+'.csv'
+previous_file_name = ''
+
+print(f"Current file name is : {file_name}")
+
+URL = "https://drive.google.com/drive/folders/1nfrYxDm7TLzls9pedZbLX5rP4McVDWDe"
+
+directory = "DriveData"
+path = os.path.abspath(directory)
+
+# Make a directory in the base folder to store the downloaded files from the GoogleDrive
+if not os.path.exists(path):
+    try:
+        os.mkdir(path)
+    except OSError as error:
+        print(error)
+
+class MongoDBClient:
+    def __init__(
+        self,
+        db: str
+    ) -> None:
+        self.client = MongoClient('mongodb://localhost:27017')
+        self.db = self.client[db]
+
+
+def timer(out_q, in_ack_q) -> None:
+    """timer() increments one day in the filename per every 5 min
+    which gives us the new filename to be downloaded from the GoogleDrive"""
+    print("Timer function executing")
+    global base_date, file_name, RUNFLAG
+    try:
+        while RUNFLAG:
+            # put this in a thread which runs for every 5 min
+            new_date = (datetime.strptime(base_date, '%Y_%m_%d') + timedelta(days=1)).strftime('%Y_%m_%d')
+            base_date = new_date
+            file_name = 'raw_' + new_date + '.csv'
+            print(f"New filename is : {file_name}")
+            out_q.put(True)    # True is a command to start downloading
+            time.sleep(2)
+            while not in_ack_q.get():       # Check if the file is busy downloading
+                pass
+    except Exception as exception:
+        print(exception)
+    print("Timer function ended")
+
+def downloader(in_q, out_ack_q) -> None:
+    """downloader() downloads new file if there is a change in the filename"""
+    global previous_file_name, RUNFLAG
+    while RUNFLAG:
+        if file_name != previous_file_name:
+            if in_q.get():      # if the filename is ready
+                out_ack_q.put(False)
+                print(f"Downloading... : {file_name}")
+                previous_file_name = file_name
+            else:
+                print("Waiting for Command to download...")
+    print("Exiting downloader...")
+
+
+
+
+if __name__ == "__main__":
+    MONGO_CLIENT = MongoDBClient('clients')
+
+    result = MONGO_CLIENT.db.sessions.find_one({
+    'session_id': 'a97ff060-462e-432d-a120-610d1440f068',
+    })
+    print("Hello -----------------------------", result)
+
+    common_q = Queue()
+    ack_q = Queue()
+    timer_thread = threading.Thread(target=timer, args =(common_q, ack_q, ))
+    timer_thread.start()
+    downloader_thread = threading.Thread(target=downloader, args=(common_q, ack_q))
+    downloader_thread.start()
+    timer_thread.join()
+    downloader_thread.join()
+
+
+To copy
+docker cp 1c1ffea9525a:/DriveData/a.txt /home/syed/Desktop/
+
+To start the docker
+docker run -it --rm --network task2_default task2_app bash
